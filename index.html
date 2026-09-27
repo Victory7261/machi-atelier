@@ -394,7 +394,7 @@ class CodeRoom extends Base{
   catch(e){if(this.generation===generation)this.leave();throw Error(brokerError(e));}
  }
  acceptConnection(conn){
-  const m=conn.metadata;if(conn.label!==LABEL||conn.serialization!=='none'||!m||m.v!==2||!/^[a-f0-9]{36}$/.test(m.sid)||!/^[a-f0-9]{64}$/.test(m.token)||this.peers.has(m.sid)){conn.close();return;}
+  const m=conn.metadata;if(conn.label!==LABEL||conn.serialization!=='raw'||!m||m.v!==2||!/^[a-f0-9]{36}$/.test(m.sid)||!/^[a-f0-9]{64}$/.test(m.token)||this.peers.has(m.sid)){conn.close();return;}
   this.bindConnection(conn,m.sid,m.token);
  }
  bindConnection(conn,id,token){
@@ -406,7 +406,7 @@ class CodeRoom extends Base{
  async join({code,userName,password=''}){
   if(this.active())throw Error('先に現在のルームから退出してください。');if(!this.available())throw Error('このブラウザでは共同プレイを使えません。最新版のブラウザで開いてください。');code=normalizeCode(code);userName=clean(userName,20);if(!userName)throw Error('表示名を入力してください。');if(password.length>128)throw Error('パスワードが長すぎます。');
   this.role='guest';this.status='connecting';this.name=userName;this.selfId=hex(18);this.record={id:'',name:'ルームに接続中',protected:false};this.roomCode=code;this.iceMode='stun';this.password=password;this.warning='';this.brokerWarning='';this.seq=-1;this.state=null;this.chat=[];this.members=[];this.generation++;const generation=this.generation;this.o.onJoining?.();this.startTimer();this.emit();
-  try{const peer=await this.openBroker('ma-g2-'+this.selfId,generation);if(this.generation!==generation||this.role!=='guest')throw Error('接続を中止しました。');const token=hex(32),conn=peer.connect('ma-r2-'+code,{label:LABEL,serialization:'none',reliable:true,metadata:{v:2,sid:this.selfId,token}});if(!conn)throw Error('ルームに接続できませんでした。');this.bindConnection(conn,this.selfId,token);}
+  try{const peer=await this.openBroker('ma-g2-'+this.selfId,generation);if(this.generation!==generation||this.role!=='guest')throw Error('接続を中止しました。');const token=hex(32),conn=peer.connect('ma-r2-'+code,{label:LABEL,serialization:'raw',reliable:true,metadata:{v:2,sid:this.selfId,token}});if(!conn)throw Error('ルームに接続できませんでした。');this.bindConnection(conn,this.selfId,token);}
   catch(e){if(this.generation===generation&&this.role==='guest'){this.status='disconnected';this.password='';this.warning=brokerError(e);this.emit('disconnected',{message:this.warning});}throw Error(brokerError(e));}
  }
  async receive(p,m){
