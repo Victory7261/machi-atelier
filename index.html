@@ -374,7 +374,14 @@ class CodeRoom extends Base{
   return new Promise((resolve,reject)=>{
    let settled=false,peer,timer;const finish=(error)=>{if(settled)return;settled=true;clearTimeout(timer);if(this.brokerCancel===cancel)this.brokerCancel=null;if(error){if(this.broker===peer){this.broker=null;this.brokerOnline=false;}peer?.destroy();reject(error);}else resolve(peer);};
    const cancel=()=>finish(Error('接続を中止しました。'));this.brokerCancel=cancel;
-   try{peer=new this.Peer(id,{host:'0.peerjs.com',port:443,path:'/',secure:true,key:'peerjs',debug:0,config:this.rtcConfig()});this.broker=peer;}catch(e){finish(e);return;}
+   try{peer=new this.Peer(id,{host:'0.peerjs.com',port:443,path:'/',secure:true,key:'peerjs',debug:0,config:this.rtcConfig()});
+    // Compatibility: PeerJS docs/builds have used both "raw" and "none"
+    // for an unserialized data connection. Accept either spelling.
+    if(peer&&peer._serializers){
+     if(peer._serializers.raw&&!peer._serializers.none)peer._serializers.none=peer._serializers.raw;
+     if(peer._serializers.none&&!peer._serializers.raw)peer._serializers.raw=peer._serializers.none;
+    }
+    this.broker=peer;}catch(e){finish(e);return;}
    timer=setTimeout(()=>finish(Error('接続仲介サービスから応答がありません。時間をおいてやり直してください。')),20000);
    const current=()=>this.broker===peer&&this.generation===generation&&this.active();
    peer.on('open',()=>{if(!current()){cancel();return;}this.brokerOnline=true;this.brokerWarning='';this.reconnectAttempts=0;clearTimeout(this.brokerRetry);finish();this.emit();});
@@ -394,7 +401,7 @@ class CodeRoom extends Base{
   catch(e){if(this.generation===generation)this.leave();throw Error(brokerError(e));}
  }
  acceptConnection(conn){
-  const m=conn.metadata;if(conn.label!==LABEL||conn.serialization!=='raw'||!m||m.v!==2||!/^[a-f0-9]{36}$/.test(m.sid)||!/^[a-f0-9]{64}$/.test(m.token)||this.peers.has(m.sid)){conn.close();return;}
+  const m=conn.metadata;if(conn.label!==LABEL||!['raw','none'].includes(conn.serialization)||!m||m.v!==2||!/^[a-f0-9]{36}$/.test(m.sid)||!/^[a-f0-9]{64}$/.test(m.token)||this.peers.has(m.sid)){conn.close();return;}
   this.bindConnection(conn,m.sid,m.token);
  }
  bindConnection(conn,id,token){
