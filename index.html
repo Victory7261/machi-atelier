@@ -230,7 +230,7 @@ class Wire {
   constructor(dc,onMessage,onFault){this.dc=dc;this.onMessage=onMessage;this.onFault=onFault;this.jobs=[];this.pending=0;this.counter=0;this.partial=null;this.dead=false;dc.bufferedAmountLowThreshold=65536;dc.addEventListener('bufferedamountlow',()=>this.pump());dc.addEventListener('open',()=>this.pump());dc.addEventListener('message',e=>this.receive(e.data));}
   get backlog(){return this.pending+(this.dc.bufferedAmount||0)}
   send(obj){if(this.dead)return false;let text;try{text=JSON.stringify(obj)}catch(e){return false}if(text.length>MAX_TEXT)return false;if(this.pending+text.length>MAX_TEXT){this.onFault('送信待ちが多すぎます。接続をやり直してください。');return false;}const id=++this.counter;this.jobs.push({id,text,pos:0,n:Math.ceil(text.length/CHUNK)});this.pending+=text.length;this.pump();return true;}
-  pump(){if(this.dead||this.dc.readyState!=='open')return;let sent=0;try{while(this.jobs.length&&(this.dc.bufferedAmount||0)<131072&&sent<64){const j=this.jobs[0],part=j.text.slice(j.pos,j.pos+CHUNK);this.dc.send(JSON.stringify({p:1,id:j.id,i:Math.floor(j.pos/CHUNK),n:j.n,s:part}));j.pos+=part.length;this.pending-=part.length;sent++;if(j.pos>=j.text.length)this.jobs.shift();}if(this.jobs.length&&(this.dc.bufferedAmount||0)<131072)setTimeout(()=>this.pump(),0);}catch(e){this.onFault('送信が中断されました。再接続してください。');}}
+  pump(){if(this.dead||this.dc.readyState!=='open')return;let sent=0;try{while(this.jobs.length&&(this.dc.bufferedAmount||0)<131072&&sent<32){const j=this.jobs[0],part=j.text.slice(j.pos,j.pos+CHUNK);this.dc.send(JSON.stringify({p:1,id:j.id,i:Math.floor(j.pos/CHUNK),n:j.n,s:part}));j.pos+=part.length;this.pending-=part.length;sent++;if(j.pos>=j.text.length)this.jobs.shift();}if(this.jobs.length&&(this.dc.bufferedAmount||0)<131072)setTimeout(()=>this.pump(),0);}catch(e){this.onFault('送信が中断されました。再接続してください。');}}
   receive(raw){if(this.dead)return;try{
     if(typeof raw!=='string'||raw.length>14000)throw Error();const p=JSON.parse(raw);
     if(p.p!==1||!Number.isSafeInteger(p.id)||p.id<1||!Number.isInteger(p.i)||!Number.isInteger(p.n)||p.n<1||p.n>Math.ceil(MAX_TEXT/CHUNK)||p.i<0||p.i>=p.n||typeof p.s!=='string'||p.s.length>CHUNK)throw Error();
@@ -241,18 +241,24 @@ class Wire {
   close(){this.dead=true;this.jobs=[];this.pending=0;this.partial=null;}
 }
 
+function sameCompactTile(a,b){if(a===b)return true;if(!Array.isArray(a)||!Array.isArray(b)||a.length!==b.length)return false;for(let i=0;i<a.length;i++)if(a[i]!==b[i])return false;return true;}
+function sameField(a,b){if(a===b)return true;if(a==null||b==null||typeof a!=='object'||typeof b!=='object')return false;return JSON.stringify(a)===JSON.stringify(b);}
 function stateDelta(a,b){
-  const meta={},cities=[];for(const k of Object.keys(b))if(k!=='cities'&&JSON.stringify(a[k])!==JSON.stringify(b[k]))meta[k]=b[k];
-  for(let i=0;i<b.cities.length;i++){const ac=a.cities[i],bc=b.cities[i],fields={},tiles=[];for(const k of Object.keys(bc))if(k!=='tiles'&&JSON.stringify(ac[k])!==JSON.stringify(bc[k]))fields[k]=bc[k];for(let j=0;j<bc.tiles.length;j++)if(JSON.stringify(ac.tiles[j])!==JSON.stringify(bc.tiles[j]))tiles.push([j,bc.tiles[j]]);if(Object.keys(fields).length||tiles.length)cities.push({id:i,fields,tiles});}return {meta,cities};
+  // Compact tiles are numeric arrays. Direct comparison avoids JSON.stringify on
+  // 65,536 tiles every synchronization pass.
+  const meta={},cities=[];for(const k of Object.keys(b))if(k!=='cities'&&!sameField(a[k],b[k]))meta[k]=b[k];
+  for(let i=0;i<b.cities.length;i++){const ac=a.cities[i],bc=b.cities[i],fields={},tiles=[];for(const k of Object.keys(bc))if(k!=='tiles'&&!sameField(ac[k],bc[k]))fields[k]=bc[k];for(let j=0;j<bc.tiles.length;j++)if(!sameCompactTile(ac.tiles[j],bc.tiles[j]))tiles.push([j,bc.tiles[j]]);if(Object.keys(fields).length||tiles.length)cities.push({id:i,fields,tiles});}return {meta,cities};
 }
 function applyDelta(a,d){
-  if(!a||!d||typeof d.meta!=='object'||!Array.isArray(d.cities)||d.cities.length>a.cities.length)throw Error('差分が不正です');const b=clone(a),bad=new Set(['__proto__','constructor','prototype','cities','tiles']);
+  if(!a||!d||typeof d.meta!=='object'||!Array.isArray(d.cities)||d.cities.length>a.cities.length)throw Error('差分が不正です');
+  // Copy only branches that changed instead of deep-cloning the entire packed map.
+  const b={...a,cities:a.cities.slice()},bad=new Set(['__proto__','constructor','prototype','cities','tiles']);
   for(const k of Object.keys(d.meta)){if(bad.has(k)||!Object.hasOwn(b,k))throw Error('差分が不正です');b[k]=d.meta[k];}
-  const seen=new Set();for(const c of d.cities){if(!Number.isInteger(c.id)||!b.cities[c.id]||seen.has(c.id)||!c.fields||!Array.isArray(c.tiles)||c.tiles.length>b.cities[c.id].tiles.length)throw Error('差分が不正です');seen.add(c.id);const dest=b.cities[c.id];for(const k of Object.keys(c.fields)){if(bad.has(k))throw Error('差分が不正です');Object.defineProperty(dest,k,{value:c.fields[k],writable:true,enumerable:true,configurable:true});}const ts=new Set();for(const pair of c.tiles){if(!Array.isArray(pair)||pair.length!==2||!Number.isInteger(pair[0])||pair[0]<0||pair[0]>=dest.tiles.length||ts.has(pair[0])||!Array.isArray(pair[1])||pair[1].length>10||pair[1].some(n=>!Number.isFinite(n)))throw Error('差分が不正です');ts.add(pair[0]);dest.tiles[pair[0]]=pair[1];}}return b;
+  const seen=new Set();for(const c of d.cities){if(!Number.isInteger(c.id)||!b.cities[c.id]||seen.has(c.id)||!c.fields||!Array.isArray(c.tiles)||c.tiles.length>b.cities[c.id].tiles.length)throw Error('差分が不正です');seen.add(c.id);const prev=b.cities[c.id],dest={...prev,tiles:prev.tiles.slice()};b.cities[c.id]=dest;for(const k of Object.keys(c.fields)){if(bad.has(k))throw Error('差分が不正です');Object.defineProperty(dest,k,{value:c.fields[k],writable:true,enumerable:true,configurable:true});}const ts=new Set();for(const pair of c.tiles){if(!Array.isArray(pair)||pair.length!==2||!Number.isInteger(pair[0])||pair[0]<0||pair[0]>=dest.tiles.length||ts.has(pair[0])||!Array.isArray(pair[1])||pair[1].length>16||pair[1].some(n=>!Number.isFinite(n)))throw Error('差分が不正です');ts.add(pair[0]);dest.tiles[pair[0]]=pair[1];}}return b;
 }
 
 class MachiRoom {
-  constructor(options={}){this.o=options;this.RTC=options.RTC||root.RTCPeerConnection;this.role='offline';this.status='offline';this.name='';this.selfId='host';this.peers=new Map();this.members=[];this.chat=[];this.typing=new Map();this.requests=new Map();this.record=null;this.accepting=true;this.seq=0;this.state=null;this.stateText='';this.lastFlush=0;this.dirty=false;this.lastTick=Date.now();this.lastPing=0;this.lastTyping=0;this.generation=0;this.warning='';this.metrics={applyMs:0};this.timer=null;}
+  constructor(options={}){this.o=options;this.RTC=options.RTC||root.RTCPeerConnection;this.role='offline';this.status='offline';this.name='';this.selfId='host';this.peers=new Map();this.members=[];this.chat=[];this.typing=new Map();this.requests=new Map();this.record=null;this.accepting=true;this.seq=0;this.state=null;this.stateText='';this.lastFlush=0;this.dirty=false;this.urgentDirty=false;this.dirtySince=0;this.lastTick=Date.now();this.lastPing=0;this.lastTyping=0;this.generation=0;this.warning='';this.metrics={applyMs:0};this.timer=null;}
   available(){return typeof this.RTC==='function'&&!!root.crypto?.subtle&&!!root.crypto?.getRandomValues;}
   emit(type='status',extra={}){this.o.onEvent?.({type,...extra});}
   isGuest(){return this.role==='guest';}
@@ -295,7 +301,7 @@ class MachiRoom {
         if(typeof m.id!=='string'||m.id.length>64)return;if(!this.rate(p,'command',80,1000)){p.wire.send({t:'result',id:m.id,result:{ok:false,error:'操作が多すぎます。少し待ってから操作してください。'}});return;}
         if(p.ackSeq<0){p.wire.send({t:'result',id:m.id,result:{ok:false,error:'最初の同期が完了するまで待ってください。'}});return;}
         let result;try{const start=performance.now();result=this.o.onCommand(m.command,{id:p.id,name:p.name});this.metrics.applyMs=performance.now()-start;}catch(e){result={ok:false,error:'この操作を実行できません。'};}
-        p.wire.send({t:'result',id:m.id,result:result||{ok:false,error:'操作が不正です。'}});if(result?.ok)this.markDirty();return;
+        p.wire.send({t:'result',id:m.id,result:result||{ok:false,error:'操作が不正です。'}});if(result?.ok)this.markDirty(true);return;
       }
       if(m.t==='chat'){if(!this.rate(p,'chat',6,10000)){p.wire.send({t:'notice',message:'メッセージが多すぎます。少し待ってください。'});return;}this.addChat(p.id,p.name,m.text);return;}
       if(m.t==='typing'){if(this.rate(p,'typing',8,5000))this.updateTyping(p.id,p.name,!!m.active);return;}
@@ -334,16 +340,16 @@ class MachiRoom {
   sendChat(text){if(!this.connected())throw Error('接続が完了してから送信してください。');if(this.role==='host')this.addChat('host',this.name,text);else this.peers.get(this.selfId)?.wire.send({t:'chat',text:String(text).slice(0,500)});this.sendTyping(false);}
   updateTyping(id,name,active){if(active)this.typing.set(id,{name,until:Date.now()+4500});else this.typing.delete(id);this.broadcast({t:'typing-event',id,name,active});this.emit('typing');}
   sendTyping(active){if(!this.connected())return;if(active&&Date.now()-this.lastTyping<1000)return;this.lastTyping=active?Date.now():0;if(this.role==='host')this.updateTyping('host',this.name,active);else this.peers.get(this.selfId)?.wire.send({t:'typing',active});}
-  command(command){if(this.role==='host'){const r=this.o.onCommand(command,{id:'host',name:this.name});if(r?.ok)this.markDirty();return Promise.resolve(r);}if(this.role!=='guest'||this.status!=='connected')return Promise.resolve({ok:false,error:'ホストとの同期が完了していません。'});const p=this.peers.get(this.selfId);if(!p?.authorized||p.wire.backlog>262144)return Promise.resolve({ok:false,error:'通信待ちです。少し待ってから操作してください。'});const id=random(12);return new Promise(resolve=>{const timer=setTimeout(()=>{this.requests.delete(id);resolve({ok:false,error:'操作の応答を確認できません。最新の地図を確認してから再操作してください。'});},15000);this.requests.set(id,{resolve,timer});if(!p.wire.send({t:'command',id,command})){clearTimeout(timer);this.requests.delete(id);resolve({ok:false,error:'送信できませんでした。'});}});}
-  markDirty(){if(this.role==='host')this.dirty=true;}
-  flush(force=false){if(this.role!=='host'||(!this.dirty&&!force))return;const next=this.o.getState(),text=JSON.stringify(next);this.dirty=false;if(text===this.stateText)return;const base=this.seq;const delta=stateDelta(this.state,next);this.seq++;this.state=next;this.stateText=text;for(const p of this.peers.values()){if(!p.authorized||p.closed)continue;if(p.wire.backlog>262144){p.needsState=true;continue;}if(p.seq===base&&!p.needsState){const message={t:'delta',base,seq:this.seq,delta};if(JSON.stringify(message).length<text.length){if(p.wire.send(message))p.seq=this.seq;else p.needsState=true;}else this.sendState(p);}else this.sendState(p);}}
+  command(command){if(this.role==='host'){const r=this.o.onCommand(command,{id:'host',name:this.name});if(r?.ok)this.markDirty(true);return Promise.resolve(r);}if(this.role!=='guest'||this.status!=='connected')return Promise.resolve({ok:false,error:'ホストとの同期が完了していません。'});const p=this.peers.get(this.selfId);if(!p?.authorized||p.wire.backlog>262144)return Promise.resolve({ok:false,error:'通信待ちです。少し待ってから操作してください。'});const id=random(12);return new Promise(resolve=>{const timer=setTimeout(()=>{this.requests.delete(id);resolve({ok:false,error:'操作の応答を確認できません。最新の地図を確認してから再操作してください。'});},15000);this.requests.set(id,{resolve,timer});if(!p.wire.send({t:'command',id,command})){clearTimeout(timer);this.requests.delete(id);resolve({ok:false,error:'送信できませんでした。'});}});}
+  markDirty(urgent=false){if(this.role==='host'){this.dirty=true;this.urgentDirty=this.urgentDirty||!!urgent;if(!this.dirtySince)this.dirtySince=Date.now();}}
+  flush(force=false){if(this.role!=='host'||(!this.dirty&&!force))return;const next=this.o.getState(),text=JSON.stringify(next);this.dirty=false;this.urgentDirty=false;this.dirtySince=0;if(text===this.stateText)return;const base=this.seq;const delta=stateDelta(this.state,next);this.seq++;this.state=next;this.stateText=text;for(const p of this.peers.values()){if(!p.authorized||p.closed)continue;if(p.wire.backlog>262144){p.needsState=true;continue;}if(p.seq===base&&!p.needsState){const message={t:'delta',base,seq:this.seq,delta};if(JSON.stringify(message).length<text.length){if(p.wire.send(message))p.seq=this.seq;else p.needsState=true;}else this.sendState(p);}else this.sendState(p);}}
   sendState(p){if(!p.authorized||p.closed)return;if(p.wire.backlog>131072){p.needsState=true;return;}if(p.wire.send({t:'state',seq:this.seq,state:this.state})){p.seq=this.seq;p.needsState=false;}else p.needsState=true;}
   setAccepting(value){if(this.role!=='host')return;this.accepting=!!value;if(!value)for(const p of [...this.peers.values()])if(!p.authorized)this.drop(p,'参加の受け付けを停止したため、この招待は取り消されました。');this.broadcastRoster();this.emit();}
   kick(id){if(this.role!=='host')return;const p=this.peers.get(id);if(p){p.wire?.send({t:'bye',message:'ホストがこの接続を終了しました。'});setTimeout(()=>this.drop(p,'ホストが接続を終了しました。'),150);}}
   drop(p,message){if(!p||p.closed)return;p.closed=true;p.wire?.close();try{p.dc?.close();p.pc.close();}catch(e){}this.peers.delete(p.id);this.typing.delete(p.id);if(this.role==='host'){if(p.authorized)this.system(p.name+' が退出しました。');this.broadcastRoster();this.emit('notice',{message:clean(message,220)});}else if(this.role==='guest'){this.status='disconnected';this.password='';this.warning=clean(message,220);for(const q of this.requests.values()){clearTimeout(q.timer);q.resolve({ok:false,error:'接続が切れました。操作結果を確認できない場合は、再接続後の地図を確認してください。'});}this.requests.clear();this.emit('disconnected',{message:this.warning});}this.emit();}
   maintenance(){
     const now=Date.now(),dt=Math.min((now-this.lastTick)/1000,1.5);this.lastTick=now;if(!this.active())return;
-    if(this.role==='host'){try{this.o.onTick?.(dt);}catch(e){this.warning='ゲームの進行を更新できませんでした。';}if(now-this.lastFlush>350){this.lastFlush=now;this.flush();}for(const p of [...this.peers.values()]){if(!p.authorized&&now>p.expires){this.drop(p,'招待の有効時間が切れました。');continue;}if(p.disconnectedAt&&now-p.disconnectedAt>15000){this.drop(p,'接続が切れました。新しい招待で接続し直せます。');continue;}if(p.needsState)this.sendState(p);}if(now-this.lastPing>5000){this.lastPing=now;for(const p of this.peers.values())if(p.authorized){p.pingAt=now;p.wire.send({t:'ping',at:now});}this.broadcastRoster();}
+    if(this.role==='host'){try{this.o.onTick?.(dt);}catch(e){this.warning='ゲームの進行を更新できませんでした。';}if(this.dirty&&now-this.lastFlush>(this.urgentDirty?150:900)){this.lastFlush=now;this.flush();}for(const p of [...this.peers.values()]){if(!p.authorized&&now>p.expires){this.drop(p,'招待の有効時間が切れました。');continue;}if(p.disconnectedAt&&now-p.disconnectedAt>15000){this.drop(p,'接続が切れました。新しい招待で接続し直せます。');continue;}if(p.needsState)this.sendState(p);}if(now-this.lastPing>5000){this.lastPing=now;for(const p of this.peers.values())if(p.authorized){p.pingAt=now;p.wire.send({t:'ping',at:now});}this.broadcastRoster();}
       const slow=[...this.peers.values()].some(p=>p.authorized&&(p.wire.backlog>262144||p.rtt>1500||p.seq-p.ackSeq>8));this.warning=slow?'通信が遅い参加者がいます。同期が追いつくまで操作を控えるか、参加の受け付けを停止できます。':this.metrics.applyMs>160?'ホストの処理に時間がかかっています。時間の進行を一時停止すると負荷を下げられます。':'';
     }
     let changed=false;for(const [id,x]of this.typing)if(x.until<=now){this.typing.delete(id);changed=true;}if(changed)this.emit('typing');if(now-(this.lastStatus||0)>1000){this.lastStatus=now;this.emit('status');}
@@ -1251,7 +1257,7 @@ function initCamera(){
 
 // The UI keeps personal saves separate from the guest's shared snapshot.
 function publicRoomState(){const packed=JSON.parse(E.serialize(region));delete packed.onlineRoom;packed.clockSpeed=speed;return packed;}
-function queueGameSave(){if(collabSaveTimer)return;collabSaveTimer=setTimeout(()=>{collabSaveTimer=null;save();},1200);}
+function queueGameSave(){if(collabSaveTimer)return;const delay=room?.active()?5000:1200;collabSaveTimer=setTimeout(()=>{collabSaveTimer=null;save();},delay);}
 function roomMessage(message,error=false){$('roomFeedback').hidden=!message;$('roomFeedback').textContent=message||'';$('roomFeedback').classList.toggle('warning',!!error);}
 function mayReplaceRegion(){if(room?.active()){toast('地域の置き換えは、ルームを終了してから行ってください。',true);return false;}return true;}
 function applyGameCommand(cmd,actor={id:'host'}){
@@ -1284,7 +1290,7 @@ function applyGameCommand(cmd,actor={id:'host'}){
    }
    case 'speed':{if(actor.id!=='host'||![0,1,3,10,30].includes(cmd.value))break;speed=cmd.value;elapsed=0;r={ok:true};break;}
   }
-  if(r.ok){E.analyze(region);if(city()&&!beforeFounded&&city().founded){configureView();category='traffic';renderCategories();selectTool('road');}else{updateIdentityHeader();updateUI();renderTools();}queueGameSave();room?.markDirty();}
+  if(r.ok){E.analyze(region);if(city()&&!beforeFounded&&city().founded){configureView();category='traffic';renderCategories();selectTool('road');}else{updateIdentityHeader();updateUI();renderTools();}queueGameSave();room?.markDirty(true);}
   return r;
  }catch(e){return {ok:false,error:'操作を実行できませんでした。地図を確認してやり直してください。'};}
 }
@@ -1353,7 +1359,7 @@ function switchRoomTab(which){$('hostSetup').hidden=which!=='host';$('guestSetup
 function prepareRoomSetup(){if(room?.active())return;const record=region.onlineRoom;$('roomName').value=record?.name||region.name+'のルーム';$('resumeRoomLabel').hidden=!record;$('resumeRoom').checked=!!record;$('passwordSetup').hidden=!!record;$('roomPassword').value='';if(record?.hostName&&!$('playerName').value)$('playerName').value=record.hostName;}
 function renderRoom(){
  if(!room)return;const v=room.view(),active=room.active();$('roomIdle').hidden=active;$('roomActive').hidden=!active;$('roomButton').classList.toggle('active',active);$('roomButton').classList.toggle('alert',!!v.warning);$('chatToggle').hidden=!active;
- $('roomStatusLine').textContent=active?(v.role==='host'?'ホスト':'参加者')+' · '+v.roomName+' · '+v.members.length+'人'+(v.status==='disconnected'?' · 接続終了':''):'8文字コードで共同プレイ · 固定の人数上限なし';
+ $('roomStatusLine').textContent=active?(v.role==='host'?'ホスト':'参加者')+' · '+v.roomName+' · '+v.members.length+'人'+(v.status==='disconnected'?' · 接続終了':''):'8文字コードで共同プレイ · 低遅延版';
  for(const id of ['newRegionButton','createRegion','restoreBackup','importSaveButton'])$(id).disabled=active;
  document.querySelectorAll('[data-speed]').forEach(b=>{b.disabled=room.isGuest();b.title=room.isGuest()?'時間の進行はホストが操作します':'';});
  if(!active){$('chatUnread').hidden=true;return;}
