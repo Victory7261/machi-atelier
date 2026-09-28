@@ -962,10 +962,31 @@ function building(t){const x=t.x,y=t.y,z=9,v=t.variant,L=t.level,type=t.type;if(
   }
   if(kind==='road'){roadGraphic(t,x,y,z,ns,layer);return;}
   if(!ns.length)ns=[[1,0],[-1,0]];
+  // Power lines are infrastructure, not the visual foreground.  On occupied tiles
+  // (roads, buildings, facilities and rail), keep poles/wires at the parcel edge so
+  // they do not run through road markings or the middle of a building.
+  if(kind==='powerLine'){
+   const poleAnchor=(q,qx,qy)=>{
+    if(!q)return [qx+.5,qy+.5];
+    const roadDirs=[[1,0],[-1,0],[0,1],[0,-1]].filter(([dx,dy])=>rawTile(qx+dx,qy+dy)?.road),
+     vertical=roadDirs.some(([,dy])=>dy),horizontal=roadDirs.some(([dx])=>dx);
+    if(q.road)return [vertical&&!horizontal?qx+.18:horizontal&&!vertical?qx+.50:qx+.18,
+                      horizontal&&!vertical?qy+.18:vertical&&!horizontal?qy+.50:qy+.18];
+    if(q.level||q.facility||q.zone||q.rail)return [qx+.12,qy+.12];
+    return [qx+.5,qy+.5];
+   };
+   const [ax,ay]=poleAnchor(t,x,y),base=project(ax,ay,z),top=project(ax,ay,z+20);
+   line([base,top],'rgba(151,154,143,.92)',1.15);
+   line([project(ax-.14,ay,z+17),project(ax+.14,ay,z+17)],'rgba(108,126,119,.92)',1.35);
+   for(const [dx,dy] of ns){
+    const q=rawTile(x+dx,y+dy),[bx,by]=poleAnchor(q,x+dx,y+dy),qz=q?Math.max(0,q.h):z;
+    line([project(ax,ay,z+18),project(bx,by,qz+18)],'rgba(83,116,109,.82)',.62);
+   }
+   return;
+  }
   for(const [dx,dy]of ns){const end=project(x+.5+dx*.5,y+.5+dy*.5,z+1);line([p,end],col,width);
    if(kind==='rail')for(let i=0;i<5;i++){let a=i/5,px=p[0]+(end[0]-p[0])*a,py=p[1]+(end[1]-p[1])*a;line([[px-3,py-1.5],[px+3,py+1.5]],'#c8c9af',1);}
   }
-  if(kind==='powerLine'){line([project(x+.5,y+.5,z),project(x+.5,y+.5,z+20)],'#b6b4a0',1.5);line([project(x+.30,y+.5,z+17),project(x+.70,y+.5,z+17)],'#8c968b',2);for(let [dx,dy]of ns)line([project(x+.5,y+.5,z+18),project(x+.5+dx,y+.5+dy,z+18)],'#6e8b82',.8);}
  }
 
 function zoneBuilding(t,w=1,d=1){
@@ -1038,7 +1059,7 @@ function diagnosticOverlay(t,x,y,z,layer,focus){
  const utility=layer==='power'||layer==='water',service=['health','education','police','fire','park'].includes(layer),pts=groundPoly(x,y);
  if(utility){
   const u=E.utilityStatus(city,t,layer),relevant=layer==='water'?(t.h>0||t.pipe):(t.pc>=0||t.facility||t.zone);
-  if(relevant){const color=u.state==='on'?(layer==='power'?'rgba(255,217,62,.64)':'rgba(35,199,239,.62)'):u.state==='shortage'?'rgba(242,161,51,.68)':u.state==='off'?'rgba(231,98,77,.64)':'rgba(137,153,150,.22)';poly(pts,color);if(u.state!=='on'&&(t.zone||t.facility||t.pipe||t.powerLine)){for(const a of [.25,.55,.8]){const p=[pts[0][0]+(pts[1][0]-pts[0][0])*a,pts[0][1]+(pts[1][1]-pts[0][1])*a],q=[pts[3][0]+(pts[2][0]-pts[3][0])*a,pts[3][1]+(pts[2][1]-pts[3][1])*a];line([p,q],'rgba(66,32,20,.5)',1);}}}
+  if(relevant){const color=u.state==='on'?(layer==='power'?'rgba(255,217,62,.30)':'rgba(35,199,239,.62)'):u.state==='shortage'?(layer==='power'?'rgba(242,161,51,.38)':'rgba(242,161,51,.68)'):u.state==='off'?(layer==='power'?'rgba(231,98,77,.36)':'rgba(231,98,77,.64)'):'rgba(137,153,150,.20)';poly(pts,color);if(u.state!=='on'&&(t.zone||t.facility||t.pipe||t.powerLine)){for(const a of [.25,.55,.8]){const p=[pts[0][0]+(pts[1][0]-pts[0][0])*a,pts[0][1]+(pts[1][1]-pts[0][1])*a],q=[pts[3][0]+(pts[2][0]-pts[3][0])*a,pts[3][1]+(pts[2][1]-pts[3][1])*a];line([p,q],'rgba(66,32,20,.5)',1);}}}
   if(layer==='water'&&t.pipe){const col=u.state==='on'?'#9ceaff':u.state==='shortage'?'#ffe2a0':'#ffb2a4',p=project(x+.5,y+.5,z+2);for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]])if(rawTile(x+dx,y+dy)?.pipe)line([p,project(x+.5+dx*.52,y+.5+dy*.52,z+2)],col,4);ellipse(p[0],p[1],2,2,col);}
  }else if(service){const v=focus?E.serviceValue(focus,t):t[layer]||0;if(v>0){poly(pts,'rgba(42,194,165,'+(.24+Math.min(v,100)/180)+')');line([...pts,pts[0]],'rgba(163,250,223,.36)',.8);}else poly(pts,'rgba(92,111,116,.22)');}
 }
@@ -1062,14 +1083,21 @@ function diagnosticOverlay(t,x,y,z,layer,focus){
   if(layer==='power'&&t.powerLine)network(t,x,y,z,'powerLine',layer);
   continue;
  }
- if(diagnostic&&view!=='region'&&!underground)poly(groundPoly(x,y),'rgba(25,52,52,.5)');if(view==='region'){if(t.tree&&t.h>0){let p=project(x+.5,y+.5,z);ellipse(p[0],p[1]-1.2,1.4,1.8,'#528d72')}if(t.road)network(t,x,y,Math.max(z,t.h<=0?1.2:0),'road',layer);if(t.rail)flat(x+.32,y+.32,.35,.35,'#6b8382',z+.3);let root=t.lot!=null?world.cities[Math.floor(y/E.N)*E.R+Math.floor(x/E.N)].tiles[t.lot]:t;let rx=Math.floor(x/E.N)*E.N+root.x,ry=Math.floor(y/E.N)*E.N+root.y;if(root.level&&atFront({x,y},rx,ry,root.lotW||1,root.lotH||1)){box(rx+.12,ry+.12,(root.lotW||1)-.24,(root.lotH||1)-.24,2+root.level*2,heightAt(rx,ry),root.zone==='ind'?'#c4bda2':root.zone==='com'?'#c0d8d5':'#e1dec1','#a8c2b4','#7daba6')}if(t.facility){flat(x+.12,y+.12,.76,.76,'#a4b6b0',z+.3)}continue;}
+ if(diagnostic&&view!=='region'&&!underground)poly(groundPoly(x,y),layer==='power'?'rgba(25,52,52,.24)':'rgba(25,52,52,.5)');
+ // Electricity coverage belongs on the ground. Draw it before roads/buildings so it
+ // never paints over the objects the player is trying to inspect.
+ if(layer==='power')diagnosticOverlay(t,x,y,z,layer,focusInfo);
+ if(view==='region'){if(t.tree&&t.h>0){let p=project(x+.5,y+.5,z);ellipse(p[0],p[1]-1.2,1.4,1.8,'#528d72')}if(t.road)network(t,x,y,Math.max(z,t.h<=0?1.2:0),'road',layer);if(t.rail)flat(x+.32,y+.32,.35,.35,'#6b8382',z+.3);let root=t.lot!=null?world.cities[Math.floor(y/E.N)*E.R+Math.floor(x/E.N)].tiles[t.lot]:t;let rx=Math.floor(x/E.N)*E.N+root.x,ry=Math.floor(y/E.N)*E.N+root.y;if(root.level&&atFront({x,y},rx,ry,root.lotW||1,root.lotH||1)){box(rx+.12,ry+.12,(root.lotW||1)-.24,(root.lotH||1)-.24,2+root.level*2,heightAt(rx,ry),root.zone==='ind'?'#c4bda2':root.zone==='com'?'#c0d8d5':'#e1dec1','#a8c2b4','#7daba6')}if(t.facility){flat(x+.12,y+.12,.76,.76,'#a4b6b0',z+.3)}continue;}
  if(underground){poly(groundPoly(x,y),'rgba(24,70,70,.60)');if(t.pipe&&layer==='water')network(t,x,y,z,'pipe',layer);if(t.subway&&layer==='subway')network(t,x,y,z,'subway',layer);}
  if(!underground){if(t.zone){let col={res:'rgba(80,164,94,.46)',com:'rgba(56,151,204,.40)',ind:'rgba(225,179,56,.43)'}[t.zone];flat(x+.04,y+.04,.92,.92,col,z+.4);if(!t.level&&t.lot==null){let p=project(x+.5,y+.5,z);g.fillStyle={res:'#407745',com:'#3c7b9b',ind:'#a08035'}[t.zone];g.font='9px sans-serif';g.textAlign='center';g.fillText(String(t.density),p[0],p[1]+3)}}if(t.road)network(t,x,y,Math.max(z,t.h<=0?5:0),'road',layer);if(t.rail)network(t,x,y,Math.max(z,t.h<=0?5:0),'rail',layer);}
  if(!t.facility&&!t.level&&t.tree&&!underground&&!diagnostic){g.save();g.translate(0,(9-z)*lift*mapScale);tree(x+.45,y+.5,.66+t.variant*.3,t.variant);g.restore();}
  if(t.powerLine&&(!underground||layer==='power'))network(t,x,y,z,'powerLine',layer);
- let root=t.lot!=null?city.tiles[t.lot]:t;if(root.level&&atFront(t,root.x,root.y,root.lotW||1,root.lotH||1)){g.save();if(underground||diagnostic)g.globalAlpha=.18;scaled(root,root.zone,root.lotW||1,root.lotH||1);g.restore();}
- if(t.facility){let f=E.facility(city,t);if(f&&atFront(t,f.x,f.y,f.w,f.h)){g.save();if(underground||diagnostic)g.globalAlpha=.22;facilityGraphic(f);g.restore();}}
- if(['air','pollution','traffic','desirability','landValue','crimeRisk','fireRisk'].includes(layer)){let v=layer==='air'?t.air:layer==='pollution'?t.waterPoll:layer==='traffic'?(t.road?(t.congestion||0)*80:0):layer==='desirability'?(t.desirability||0):layer==='landValue'?(t.landValue||0):layer==='crimeRisk'?(t.crimeRisk||0):(t.fireRisk||0);const good=layer==='desirability'||layer==='landValue';if(v>1)poly(groundPoly(x,y),heatColor(good?100-v:v));}if(diagnostic)diagnosticOverlay(t,x,y,z,layer,focusInfo);
+ let root=t.lot!=null?city.tiles[t.lot]:t;if(root.level&&atFront(t,root.x,root.y,root.lotW||1,root.lotH||1)){g.save();if(underground||diagnostic)g.globalAlpha=layer==='power'?.82:.18;scaled(root,root.zone,root.lotW||1,root.lotH||1);g.restore();}
+ if(t.facility){let f=E.facility(city,t);if(f&&atFront(t,f.x,f.y,f.w,f.h)){g.save();if(underground||diagnostic)g.globalAlpha=layer==='power'?.86:.22;facilityGraphic(f);g.restore();}}
+ if(['air','pollution','traffic','desirability','landValue','crimeRisk','fireRisk'].includes(layer)){let v=layer==='air'?t.air:layer==='pollution'?t.waterPoll:layer==='traffic'?(t.road?(t.congestion||0)*80:0):layer==='desirability'?(t.desirability||0):layer==='landValue'?(t.landValue||0):layer==='crimeRisk'?(t.crimeRisk||0):(t.fireRisk||0);const good=layer==='desirability'||layer==='landValue';if(v>1)poly(groundPoly(x,y),heatColor(good?100-v:v));}if(diagnostic&&layer!=='power')diagnosticOverlay(t,x,y,z,layer,focusInfo);
+ // In the power diagnostic view all surface objects remain readable; only the slim
+ // edge-mounted overhead wire is redrawn on top as the infrastructure cue.
+ if(layer==='power'&&t.powerLine)network(t,x,y,z,'powerLine',layer);
  }
  if(view==='region'){for(let c of world.cities){let x=c.cx*E.N,y=c.cy*E.N;line([project(x,y,1),project(x+E.N,y,1),project(x+E.N,y+E.N,1),project(x,y+E.N,1),project(x,y,1)],'rgba(242,250,232,.62)',1)}}g=ctx;
  }
